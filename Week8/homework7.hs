@@ -8,10 +8,10 @@ data Prop = Var Vars | Const Bool | And Prop Prop | Or Prop Prop | Not Prop
     | Imp Prop Prop | Iff Prop Prop | Xor Prop Prop
     deriving (Show,Eq)
 
-prop1 = Var "X" `And` Var "Y"
-prop2 = Var "X" `Imp` Var "Y"
-prop3 = Not (Var "X") `Or` (Var "Y")
-prop4 = Not (Var "X") `Iff` Not (Var "Y")
+-- prop1 = Var "X" `And` Var "Y"
+-- prop2 = Var "X" `Imp` Var "Y"
+-- prop3 = Not (Var "X") `Or` (Var "Y")
+-- prop4 = Not (Var "X") `Iff` Not (Var "Y")
 
 -- 2.1 Variables
 fv :: Prop-> [Vars]
@@ -70,14 +70,12 @@ tauto p = not (sat (Not p))
 
 -- ---- 3.2 Finding satisfying/refuting assignments----
 findSat::Prop->Maybe Env
-findSat p = case filter (\env-> eval env p) (genEnvs (fv p)) of
-    [] -> Nothing
-    (env:_)-> Just env
+findSat p = find (`eval` p) 
+                (genEnvs (fv p))
 
 findRefute::Prop->Maybe Env
-findRefute p = case filter (\env-> not (eval env p)) (genEnvs (fv p)) of
-    [] -> Nothing
-    (env:_)-> Just env
+findRefute p = find (\env-> not (eval env p)) 
+                    (genEnvs (fv p))
 
 -- ---- 3.3 Classifying formulas----
 classify::Prop->String

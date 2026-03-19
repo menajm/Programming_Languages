@@ -1,3 +1,4 @@
+
 type Vars = String
 type Value = Integer
 type Env = [(Vars, Value)]
