@@ -7,12 +7,72 @@ data Types = TVar TVars | Fun Types Types
 --    /\ ::= V | /\ /\ | \ V /\   -- grammar of terms 
 data Lam = Var Vars | App Lam Lam | Abs Vars Lam 
 
+instance Show Types where
+    show (TVar a) = a
+
+
 instance Show Lam where 
   show (Var x) = x 
   show (App s@(Abs _ _) t) = "(" ++ show s ++ ")" ++ "(" ++ show t ++ ")"
   show (App s (Var x)) = show s ++ x
   show (App s t) = show s ++ "(" ++ show t ++ ")"
   show (Abs x t) = "\\" ++ x ++ "." ++ show t 
+
+-- Functions for dealing with type variables
+tvs::Types->[TVars]
+tvs (TVar a) = [a]
+tvs (Fun t1 t2) = tvs t1 ++ tvs t2
+
+tsubst:: (TVars, Types)-> Types -> Types
+tsubst (a, t) (TVar b) 
+    | a == b    = t
+    | otherwise = TVar b
+tsubst (a, t) (Fun t1 t2) = Fun (tsubst (a, t) t1) (tsubst (a, t) t2)
+
+-- Representation of contexts and type constraints
+type Constr = (Types, Types)
+type Cxt = [(Vars, Types)]
+
+tvsCxt :: Cxt -> [TVars]
+tvsCxt [] = []
+tvsCxt ((x, t): gamma) = tvs t ++ tvsCxt gamma
+
+tsubstConstrList :: (TVars, Types) -> [Constr] -> [Constr]
+tsubstConstrList (a, t) [] = []
+tsubstConstrList (a, t) ((l, r):cs) = (tsubst (a, t) l, tsubst (a, t) r) : rest
+    where rest = tsubstConstrList (a, t) cs
+
+-- The core of type inference: generating the constraints
+genConstrs:: Cxt->Lam->Types-> [Constr]
+genConstrs gamma (Var x) ty = case lookup x  gamma of
+                        Nothing -> error ("Var not in context: " ++ x)
+                        Just t -> [(t, ty)] 
+genConstrs gamma (App s t) ty =
+                        let a = getVar(tvsCxt gamma ++ tvs ty)
+                            cs1 = genConstrs gamma s (Fun (TVar a) ty)
+                            cs2 = genConstrs gamma t (TVar a)
+                        in cs1 ++ cs2
+genConstrs gamma (Abs x r) (Fun type1 type2) =
+                        genConstrs ((x, type1): gamma) r type2
+genConstrs gamma (Abs x r) ty = 
+                        let a1 = getVar (tvsCxt gamma ++  tvs ty)
+                            a2 = getVar (a1 : tvsCxt gamma ++ tvs ty)
+                            cs = genConstrs ((x, TVar a1): gamma) r (TVar a2)
+                        in (ty, Fun (TVar a1) (TVar a2)) : cs
+
+
+-- Final stage is solving the constraints
+type TSub = [(TVars, Types)]
+
+-- Solving the constraints step
+unify::[Constr]->TSub
+unify [] = []
+unify ((lhs, rhs):cs) | lhs == rhs = unify cs
+unify ((TVar a, rhs):cs) | elem a (tvs rhs) = error "Occurs check: Cannot construct infinite type error!" 
+unify ((TVar a, rhs):cs) = (a, rhs) : unify (tsubstConstrList (a, rhs) cs)
+unify ((Fun t1 t2, TVar a):cs) = unify ((TVar a), Fun t1 t2):cs
+unify ((Fun t1, t2, Fun v1 v2):cs) = unify ((t1, v1):(t2, v2):cs)
+unify _ = errpr "Type error!"
 
 -- Collect all the free variables in a given lamda term
 fv :: Lam -> [Vars]
@@ -82,27 +142,6 @@ s = Abs "x" (Abs "y" (Abs "z" (App (App (Var "x") (Var "z")) (App (Var "y") (Var
 k = Abs "x" (Abs "y" (Var "x"))
 i = Abs "v" (Var "v")
 w = Abs "x" (Abs "y" (App (App (Var "x") (Var "y")) (Var "y")))
-
--- "Haskell is a lazy language"
-
-f x = f (x + 1)
-g x = if x < 5 then x else f x 
-
-zeros :: [Integer] 
-zeros = 0 : zeros
-
-allNums :: [Integer] 
-allNums = 0 : map (+1) allNums  
- 
-fib :: Integer -> Integer 
-fib x = if x <= 1 then x else fib (x-1) + fib (x-2)
-
-fibs :: [Integer]
-fibs = 0 : 1 : zipWith (+) fibs (tail fibs)
-
-primes :: [Integer] 
-primes = sieve [2..] where 
-  sieve (x:xs) = x : sieve (filter (\y -> mod y x /= 0) xs)
 
 allVars :: [String] 
 allVars = tail vs where 
