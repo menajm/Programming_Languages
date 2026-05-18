@@ -1,4 +1,5 @@
 import Data.Char
+import Data.List
 
 type Vars = String
 type TVars = String
@@ -49,30 +50,49 @@ parser = sr []
 -- Helper for parser
 sr :: [Token] -> [Token] -> Either Terms String
 sr [PT t] [] = Left t
--- Error cases
-sr stack [] = Right ("Parse Error: " ++  show stack)
+
+sr (VSym x : s) (Dot : q) = sr (Dot : VSym x : s) q
+sr (VSym x : s) q = sr (PT (Var x) : s) q
+sr (CSym c : s) q = sr (PT (Num c) : s) q
+sr (YComb : s) q  = sr (PT Y : s) q
+
 sr _ (Err e : _) = Right ("Lexical Error: " ++ e)
 
--- Reduction rules
 sr (RPar : PT m : LPar : s) q = sr (PT m : s) q
 
-sr (PT u : ElseK : PT t : ThenK : PT s : IfPositiveK : s') q = 
-    sr (PT (IfPos s t u): s')q
-
-sr (PT t : SubOp : PT s : s') q = sr (PT (Sub s t): s') q
-
-sr (PT m : Dot : VSym x : Backslash : s) q = sr (PT (Abs x m): s) q
-
 sr (PT n : PT m : s) q
-    | null q || isNotOperator (head q) = sr (PT (App m n): s) q
-        where isNotOperator t = t `notElem` [Dot, SubOp, ThenK, ElseK]
+    | null q || isNotOp (head q) = sr (PT (App m n) : s) q
+    where 
+        isNotOp tok = case tok of
+            VSym _ -> True
+            CSym _ -> True
+            LPar   -> True
+            _      -> False
 
-sr (VSym x : s)(Dot : q) = sr (Dot : VSym x : s) q
-sr (VSym x : s)q = sr (PT (Var x) : s)q
-sr (CSym c : s)q = sr (PT (Num c) : s) q
-sr (YComb : s)q = sr (PT Y : s) q
+sr (PT m : Dot : VSym x : Backslash : s) q
+    | null q || notFollowsBody (head q) = sr (PT (Abs x m) : s) q
+    where
+        notFollowsBody tok = case tok of
+            VSym _ -> False
+            CSym _ -> False
+            LPar   -> False
+            SubOp  -> False
+            _      -> True
 
+sr (PT t : SubOp : PT s : s') q = sr (PT (Sub s t) : s') q
+sr (PT u : ElseK : PT t : ThenK : PT s : IfPositiveK : s') q
+    | null q || notFollowsElse (head q) = sr (PT (IfPos s t u): s') q
+    where
+        notFollowsElse tok = case tok of
+            SubOp  -> False
+            VSym _ -> False
+            CSym _ -> False
+            LPar   -> False
+            _      -> True
+
+sr stack [] = Right ("Parse Error: " ++  show stack)
 sr s (t:q) = sr (t:s) q
+
 
 
 -- --- Section 3 Typing ---
@@ -94,61 +114,78 @@ csubst (a, t) (l, r)= (tsubst (a, t) l, tsubst (a, t) r)
 getTVars :: Types -> [TVars]
 getTVars Ints = []
 getTVars (TVar a) = [a]
-getTVars (Fun t1 t2) = getTVars t1 ++ getTVars t2
+getTVars (Fun t1 t2) = nub (getTVars t1 ++ getTVars t2)
 
 getTVarsCxt :: Cxt -> [TVars]
-getTVarsCxt [] = []
-getTVarsCxt ((x, t) : gamma) = getTVars t ++ getTVarsCxt gamma
+getTVarsCxt gamma = nub [v | (_, t) <- gamma, v <- getTVars t]
+
+
 
 -- 3.2
--- Helper to find a name not already used in the context/target type
-getVar::[TVars]->TVars
-getVar used = head [ [v] | v <- ['a' .. 'z'], [v] `notElem` used]
 
-genConstrs::Cxt->Terms->Types->[Constr]
-genConstrs gamma (Var x) ty = case lookup x gamma of
-                    Nothing -> error("Var not in context: " ++ x)
-                    Just t -> [(t, ty)]
-genConstrs gamma (Num n) ty = [(Ints, ty)]
+genConstrs :: Cxt -> Terms -> Types -> [Constr]
+-- Variable
+genConstrs gamma (Var x) ty =
+    case lookup x gamma of
+        Nothing -> error ("Var not in context: " ++ x)
+        Just t  -> [(t, ty)]
+-- Number
+genConstrs gamma (Num _) ty = [(ty, Ints)]
+-- Sub
 genConstrs gamma (Sub s t) ty =
     (ty, Ints) : genConstrs gamma s Ints ++ genConstrs gamma t Ints
+-- IfPositive
 genConstrs gamma (IfPos r s t) ty =
     genConstrs gamma r Ints ++ genConstrs gamma s ty ++ genConstrs gamma t ty
-genConstrs gamma Y ty = 
-        let a = getVar (getTVars ty ++ getTVarsCxt gamma)
-            in [(ty, Fun (Fun (TVar a) (TVar a)) (TVar a))]
+-- Y combinator: Standard fixed-point type
+genConstrs gamma Y ty =
+    let fresh = "v" ++ show (length gamma)
+    in [(ty, Fun (Fun (TVar fresh) (TVar fresh)) (TVar fresh))]
+
+-- Application: intermediate type for the function domain
 genConstrs gamma (App s t) ty =
-        let a = getVar (getTVarsCxt gamma ++ getTVars ty)
-            cs1 = genConstrs gamma s (Fun (TVar a) ty)
-            cs2 = genConstrs gamma t (TVar a)
-                in cs1 ++ cs2
-genConstrs gamma (Abs x r) (Fun t1 t2) =
-    genConstrs ((x, t1) : gamma) r t2
+    let argTy = "t_app" ++ show (length gamma)
+    in genConstrs gamma s (Fun (TVar argTy) ty) ++ genConstrs gamma t (TVar argTy)
+
+-- Abstraction: Bind x to a type and recurse
 genConstrs gamma (Abs x r) ty =
-    let used1 = getTVarsCxt gamma ++ getTVars ty
-        a1 = getVar used1
-        a2 = getVar (a1 : used1)
-        cs = genConstrs ((x, TVar a1) : gamma) r (TVar a2)
-            in (ty, Fun (TVar a1) (TVar a2)) : cs
+    let inTy  = "ty_" ++ x
+        outTy = "res_" ++ x
+    in (ty, Fun (TVar inTy) (TVar outTy)) : genConstrs ((x, TVar inTy) : gamma) r (TVar outTy)
 
 -- 3.3
 unify::[Constr]->[(TVars, Types)]
 unify [] = []
-unify ((Ints, Ints) : cs) = unify cs
-unify ((TVar a, TVar b) : cs) | a == b = unify cs
-unify ((TVar a, t): cs)
-    | a `elem` getTVars t = error "Infinite Type error"
-    | otherwise          = (a, t) : unify (map (csubst (a, t)) cs)
-unify ((t, TVar a) : cs) = unify ((TVar a, t) : cs)
-unify ((Fun l1 r1, Fun l2 r2) : cs) =
-    unify ((l1, l2) : (r1, r2) : cs)
-unify (c:_) = error ("Cannot unify: " ++ show c)
+unify ((s,t):cs)
+  | s == t = unify cs
+-- variable case
+unify ((TVar x, t):cs)
+  | occurs x t = error "Infinite Type error"
+  | otherwise =
+      let sub = (x, t)
+          cs' = map (csubst sub) cs
+          rest = unify cs'
+      in sub : map (\(y, ty) -> (y, tsubst sub ty)) rest
+-- symmetric case
+unify ((t, TVar x):cs) =
+  unify ((TVar x, t):cs)
+-- function case
+unify ((Fun s1 s2, Fun t1 t2):cs) =
+  unify ((s1,t1):(s2,t2):cs)
+-- mismatch
+unify _ = error "Type error"
+
+occurs :: TVars -> Types -> Bool
+occurs x t = x `elem` getTVars t
+
 
 infer::Terms->Types
-infer t = 
-    let cs = genConstrs [] t (TVar "a")
+infer t =
+    let target = TVar "final_result"
+        cs = genConstrs [] t target
         sub = unify cs
-    in foldl (flip tsubst) (TVar "a") sub
+    in foldl (\acc s -> tsubst s acc) target sub
+
 
 
 -- --- Section 4 Reduction ---
@@ -170,25 +207,18 @@ subst _ Y = Y
 
 -- 4.2
 red :: Terms -> Terms
--- 4.2.1 Reduction Rules
-red (App (Abs x s) t) = subst (x, t) s
-red (Sub (Num m) (Num n)) = Num (m-n)
-red (IfPos(Num n) s t) 
-    | n > 0 = s
-    | otherwise = t
-red (App Y t) = App t (App Y t)
+red (App (Abs x s) t)     = subst (x, t) s
+red (App Y t)             = App t (App Y t)
+red (Sub (Num m) (Num n)) = Num (m - n)
+red (IfPos (Num n) s t)   = if n > 0 then s else t
 
-
--- 4.2.2
 red (App s t) = App (red s) (red t)
 red (Sub s t) = Sub (red s) (red t)
 red (IfPos r s t) = IfPos (red r) (red s) (red t)
 red (Abs x s) = Abs x (red s)
 
--- 4.2.3                        
-red (Var x) = Var x
-red (Num n) = Num n
-red Y = Y
+-- Base cases
+red t = t
 
 -- 4.2.4
 reds :: Terms -> Terms
@@ -197,9 +227,11 @@ reds t = let t' = red t
                 then t
                 else reds t'
 
+
+
 -- --- Section 5 Frontend ---
-main::IO ()
-main = do
+homeworkMain::IO ()
+homeworkMain = do
     -- Query user for filename
     putStr "Enter the file name: "
     fileName <- getLine
